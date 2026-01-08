@@ -81,7 +81,7 @@ function App() {
       
       const newText = {
         id: Date.now(),
-        text: 'Imagine yourself having this',
+        text: 'Illustrative lifestyle image generated to show how the product may be used in daily life.',
         x,
         y,
         fontSize: 24,
