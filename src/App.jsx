@@ -53,37 +53,56 @@ function App() {
   const eraseCanvasRef = useRef(null);
   const containerRef = useRef(null);
 
- // Initialize erase canvas when image loads - WITH TRANSPARENCY SUPPORT
+ // Initialize erase canvas when image loads OR when entering erase mode
 useEffect(() => {
-  if (imgSrc && imgRef.current && eraseCanvasRef.current) {
+  const initCanvas = () => {
+    if (!imgRef.current || !eraseCanvasRef.current) return;
+    
     const img = imgRef.current;
     const canvas = eraseCanvasRef.current;
     
-    const initCanvas = () => {
-      // Force canvas to match image size
-      canvas.width = img.naturalWidth || img.width;
-      canvas.height = img.naturalHeight || img.height;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      
-      // Clear canvas to transparent
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw image
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      
-      console.log('Canvas initialized:', canvas.width, 'x', canvas.height); // Debug
-    };
+    // Wait for image to be loaded
+    if (!img.complete || img.naturalWidth === 0) {
+      return;
+    }
+    
+    // Initialize canvas
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    // Clear and draw
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
+  
+  if (imgSrc) {
+    // Try to initialize immediately
+    initCanvas();
+    
+    // Also try after a small delay (for slow image loading)
+    const timer = setTimeout(initCanvas, 100);
+    
+    return () => clearTimeout(timer);
+  }
+}, [imgSrc, editMode]); // Reinitialize when switching to erase mode too
 
-    if (img.complete && img.naturalWidth > 0) {
-      initCanvas();
-    } else {
-      img.onload = () => {
-        // Small delay to ensure image is fully loaded
-        setTimeout(initCanvas, 100);
-      };
+// Ensure canvas is ready when entering erase mode
+useEffect(() => {
+  if (editMode === 'erase' && imgRef.current && eraseCanvasRef.current) {
+    const canvas = eraseCanvasRef.current;
+    const img = imgRef.current;
+    
+    // Check if canvas is empty or wrong size
+    if (canvas.width === 0 || canvas.width !== img.naturalWidth) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     }
   }
-}, [imgSrc]);
+}, [editMode]);
 
 
   // Handle image upload
@@ -447,22 +466,6 @@ function resetEraseCanvas() {
   }
 
 
-  // Force initialize erase canvas when entering erase mode
-useEffect(() => {
-  if (editMode === 'erase' && imgRef.current && eraseCanvasRef.current) {
-    const img = imgRef.current;
-    const canvas = eraseCanvasRef.current;
-    
-    // Only initialize if canvas is empty
-    if (canvas.width === 0 || canvas.height === 0) {
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    }
-  }
-}, [editMode]);
 
   // Global mouse event listeners
   useEffect(() => {
@@ -895,6 +898,7 @@ useEffect(() => {
       ref={imgRef}
       src={imgSrc}
       alt="Upload"
+        crossOrigin="anonymous"  // Add this line
       style={{ 
         maxWidth: '100%', 
         display: eraseStrokes > 0 ? 'none' : (editMode === 'erase' ? 'none' : 'block'),
