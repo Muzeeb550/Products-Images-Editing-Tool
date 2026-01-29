@@ -32,14 +32,59 @@ function App() {
   const [arrows, setArrows] = useState([]);
   const [selectedArrow, setSelectedArrow] = useState(null);
   const [draggingArrow, setDraggingArrow] = useState(null);
-  const [arrowDragPoint, setArrowDragPoint] = useState(null); // 'start' or 'end'
+  const [arrowDragPoint, setArrowDragPoint] = useState(null);
+  
+  // Eraser
+  const [isErasing, setIsErasing] = useState(false);
+  const [brushSize, setBrushSize] = useState(25);
+  const [eraseMode, setEraseMode] = useState('blur'); // 'transparent', 'color', or 'blur'
+  const [eraseFillColor, setEraseFillColor] = useState('#FFFFFF');
+  const [eraseBlurStrength, setEraseBlurStrength] = useState(15);
+  const [brushPosition, setBrushPosition] = useState({ x: 0, y: 0, visible: false });
+  const [lastErasePoint, setLastErasePoint] = useState(null);
+  const [eraseStrokes, setEraseStrokes] = useState(0); // Track number of erase strokes
+
   
   // Mode toggle
-  const [editMode, setEditMode] = useState('crop'); // 'crop', 'focus', 'text', or 'arrow'
+  const [editMode, setEditMode] = useState('crop');
   
   const imgRef = useRef(null);
   const canvasRef = useRef(null);
+  const eraseCanvasRef = useRef(null);
   const containerRef = useRef(null);
+
+ // Initialize erase canvas when image loads - WITH TRANSPARENCY SUPPORT
+useEffect(() => {
+  if (imgSrc && imgRef.current && eraseCanvasRef.current) {
+    const img = imgRef.current;
+    const canvas = eraseCanvasRef.current;
+    
+    const initCanvas = () => {
+      // Force canvas to match image size
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      
+      // Clear canvas to transparent
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw image
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      
+      console.log('Canvas initialized:', canvas.width, 'x', canvas.height); // Debug
+    };
+
+    if (img.complete && img.naturalWidth > 0) {
+      initCanvas();
+    } else {
+      img.onload = () => {
+        // Small delay to ensure image is fully loaded
+        setTimeout(initCanvas, 100);
+      };
+    }
+  }
+}, [imgSrc]);
+
 
   // Handle image upload
   function onSelectFile(e) {
@@ -59,7 +104,7 @@ function App() {
     }
   }
 
-  // Add focus point on image click (only in focus mode)
+  // Handle image click
   function handleImageClick(e) {
     if (editMode === 'focus' && focusEnabled && imgRef.current) {
       if (e.target.tagName === 'DIV') return;
@@ -73,7 +118,6 @@ function App() {
       }
     }
     
-    // Add text on image click (only in text mode)
     if (editMode === 'text' && imgRef.current && e.target === imgRef.current) {
       const rect = imgRef.current.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -96,7 +140,6 @@ function App() {
       setSelectedText(newText.id);
     }
 
-    // Add arrow on image click (only in arrow mode)
     if (editMode === 'arrow' && imgRef.current && e.target === imgRef.current) {
       const rect = imgRef.current.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -118,13 +161,213 @@ function App() {
     }
   }
 
-  // Handle focus point drag start
-  function handleFocusMouseDown(e, focusId) {
-    e.stopPropagation();
-    setDraggingFocus(focusId);
+  // Eraser functions - WITH SMART BLUR MODE
+  function eraseAtPoint(canvasX, canvasY) {
+    if (!eraseCanvasRef.current) return;
+    
+    const canvas = eraseCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    if (eraseMode === 'transparent') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = 'rgba(0,0,0,1)';
+    } else if (eraseMode === 'color') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = eraseFillColor;
+    } else if (eraseMode === 'blur') {
+      // Smart blur - apply blur filter to erased area
+      ctx.save();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.filter = `blur(${eraseBlurStrength}px)`;
+      
+      // Get the area to blur
+      const radius = brushSize / 2;
+      ctx.drawImage(
+        canvas,
+        canvasX - radius,
+        canvasY - radius,
+        brushSize,
+        brushSize,
+        canvasX - radius,
+        canvasY - radius,
+        brushSize,
+        brushSize
+      );
+      
+      ctx.restore();
+      ctx.globalCompositeOperation = 'source-over';
+      return; // Exit early for blur mode
+    }
+    
+    ctx.beginPath();
+    ctx.arc(canvasX, canvasY, brushSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.globalCompositeOperation = 'source-over';
   }
 
-  // Handle focus point dragging
+  function handleEraseMouseDown(e) {
+    if (editMode !== 'erase' || !eraseCanvasRef.current) return;
+    e.preventDefault();
+    
+    setIsErasing(true);
+    const canvas = eraseCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    // Calculate scale factor between displayed size and actual canvas size
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    // Get mouse position relative to canvas
+    const displayX = e.clientX - rect.left;
+    const displayY = e.clientY - rect.top;
+    
+    // Convert to actual canvas coordinates
+    const canvasX = displayX * scaleX;
+    const canvasY = displayY * scaleY;
+    
+    eraseAtPoint(canvasX, canvasY);
+    setLastErasePoint({ x: canvasX, y: canvasY });
+    
+    // Update brush cursor
+    setBrushPosition({ x: displayX, y: displayY, visible: true });
+  }
+
+  function handleEraseMouseMove(e) {
+    if (editMode !== 'erase' || !eraseCanvasRef.current) return;
+    
+    const canvas = eraseCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    // Calculate scale factor
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    // Get mouse position
+    const displayX = e.clientX - rect.left;
+    const displayY = e.clientY - rect.top;
+    
+    // Convert to canvas coordinates
+    const canvasX = displayX * scaleX;
+    const canvasY = displayY * scaleY;
+    
+    // Update brush cursor position
+    setBrushPosition({ x: displayX, y: displayY, visible: true });
+    
+    if (isErasing) {
+      const ctx = canvas.getContext('2d');
+      
+      if (eraseMode === 'transparent') {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.strokeStyle = 'rgba(0,0,0,1)';
+      } else if (eraseMode === 'color') {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = eraseFillColor;
+      } else if (eraseMode === 'blur') {
+        // Apply blur along the stroke
+        if (lastErasePoint) {
+          ctx.save();
+          ctx.filter = `blur(${eraseBlurStrength}px)`;
+          ctx.lineWidth = brushSize;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          
+          // Draw blurred line
+          ctx.beginPath();
+          ctx.moveTo(lastErasePoint.x, lastErasePoint.y);
+          ctx.lineTo(canvasX, canvasY);
+          
+          // Use the canvas itself as source for blur
+          const gradient = ctx.createLinearGradient(
+            lastErasePoint.x,
+            lastErasePoint.y,
+            canvasX,
+            canvasY
+          );
+          ctx.strokeStyle = gradient;
+          ctx.globalCompositeOperation = 'source-over';
+          
+          // Blur the area by redrawing it
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = canvas.width;
+          tempCanvas.height = canvas.height;
+          const tempCtx = tempCanvas.getContext('2d');
+          tempCtx.drawImage(canvas, 0, 0);
+          
+          ctx.filter = `blur(${eraseBlurStrength}px)`;
+          ctx.drawImage(
+            tempCanvas,
+            canvasX - brushSize,
+            canvasY - brushSize,
+            brushSize * 2,
+            brushSize * 2,
+            canvasX - brushSize,
+            canvasY - brushSize,
+            brushSize * 2,
+            brushSize * 2
+          );
+          
+          ctx.restore();
+        }
+        
+        eraseAtPoint(canvasX, canvasY);
+        setLastErasePoint({ x: canvasX, y: canvasY });
+        return;
+      }
+      
+      ctx.lineWidth = brushSize;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      if (lastErasePoint) {
+        ctx.beginPath();
+        ctx.moveTo(lastErasePoint.x, lastErasePoint.y);
+        ctx.lineTo(canvasX, canvasY);
+        ctx.stroke();
+      }
+      
+      eraseAtPoint(canvasX, canvasY);
+      setLastErasePoint({ x: canvasX, y: canvasY });
+      
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+
+ // NEW CODE ✅
+function handleEraseMouseUp() {
+  setIsErasing(false);
+  setLastErasePoint(null);
+  setEraseStrokes(prev => prev + 1); // Trigger preview update
+}
+
+
+  function handleEraseMouseLeave() {
+    setBrushPosition({ x: 0, y: 0, visible: false });
+    setIsErasing(false);
+    setLastErasePoint(null);
+  }
+
+  // NEW CODE ✅
+function resetEraseCanvas() {
+  if (!imgRef.current || !eraseCanvasRef.current) return;
+  
+  const img = imgRef.current;
+  const canvas = eraseCanvasRef.current;
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  
+  // Clear to transparent
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // Redraw image
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  
+  // Reset erase counter
+  setEraseStrokes(0);
+}
+
+
   function handleFocusMouseMove(e) {
     if (draggingFocus && imgRef.current && editMode === 'focus') {
       const rect = imgRef.current.getBoundingClientRect();
@@ -140,19 +383,17 @@ function App() {
     }
   }
 
-  // Handle focus point drag end
   function handleFocusMouseUp() {
     setDraggingFocus(null);
   }
 
-  // Handle text drag start
+  // Handle text drag
   function handleTextMouseDown(e, textId) {
     e.stopPropagation();
     setDraggingText(textId);
     setSelectedText(textId);
   }
 
-  // Handle text dragging
   function handleMouseMove(e) {
     if (draggingText && imgRef.current && editMode === 'text') {
       const rect = imgRef.current.getBoundingClientRect();
@@ -166,12 +407,11 @@ function App() {
     }
   }
 
-  // Handle text drag end
   function handleMouseUp() {
     setDraggingText(null);
   }
 
-  // Handle arrow drag start
+  // Handle arrow drag
   function handleArrowMouseDown(e, arrowId, point) {
     e.stopPropagation();
     setDraggingArrow(arrowId);
@@ -179,7 +419,6 @@ function App() {
     setSelectedArrow(arrowId);
   }
 
-  // Handle arrow dragging
   function handleArrowMouseMove(e) {
     if (draggingArrow && imgRef.current && editMode === 'arrow') {
       const rect = imgRef.current.getBoundingClientRect();
@@ -202,13 +441,30 @@ function App() {
     }
   }
 
-  // Handle arrow drag end
   function handleArrowMouseUp() {
     setDraggingArrow(null);
     setArrowDragPoint(null);
   }
 
-  // Add global mouse event listeners for dragging
+
+  // Force initialize erase canvas when entering erase mode
+useEffect(() => {
+  if (editMode === 'erase' && imgRef.current && eraseCanvasRef.current) {
+    const img = imgRef.current;
+    const canvas = eraseCanvasRef.current;
+    
+    // Only initialize if canvas is empty
+    if (canvas.width === 0 || canvas.height === 0) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    }
+  }
+}, [editMode]);
+
+  // Global mouse event listeners
   useEffect(() => {
     if (draggingText || draggingFocus || draggingArrow) {
       const handleMove = (e) => {
@@ -231,76 +487,70 @@ function App() {
     }
   }, [draggingText, draggingFocus, draggingArrow, focusPoints, textOverlays, arrows]);
 
-  // Remove a focus point
+  // Focus point functions
   function removeFocusPoint(id) {
     setFocusPoints(focusPoints.filter(point => point.id !== id));
   }
 
-  // Clear all focus points
   function clearAllFocusPoints() {
     setFocusPoints([]);
   }
 
-  // Update text overlay
+  // Text overlay functions
   function updateTextOverlay(id, updates) {
     setTextOverlays(textOverlays.map(text => 
       text.id === id ? { ...text, ...updates } : text
     ));
   }
 
-  // Remove text overlay
   function removeTextOverlay(id) {
     setTextOverlays(textOverlays.filter(text => text.id !== id));
     if (selectedText === id) setSelectedText(null);
   }
 
-  // Clear all text overlays
   function clearAllTextOverlays() {
     setTextOverlays([]);
     setSelectedText(null);
   }
 
-  // Update arrow
+  // Arrow functions
   function updateArrow(id, updates) {
     setArrows(arrows.map(arrow => 
-      arrow.id === id ? { ...arrow, ...updates } : arrow
+      arrow.id === id ? { ...arrow, ...updates} : arrow
     ));
   }
 
-  // Remove arrow
   function removeArrow(id) {
     setArrows(arrows.filter(arrow => arrow.id !== id));
     if (selectedArrow === id) setSelectedArrow(null);
   }
 
-  // Clear all arrows
   function clearAllArrows() {
     setArrows([]);
     setSelectedArrow(null);
   }
 
-  // Generate preview with filters, focus points, text overlays, and arrows
+  // Generate preview - FIXED TO USE ERASED CANVAS
   function generatePreview() {
     if (!imgRef.current || !canvasRef.current) {
       return;
     }
 
-    const image = imgRef.current;
     const canvas = canvasRef.current;
     
     const crop = completedCrop || {
       x: 0,
       y: 0,
-      width: image.width,
-      height: image.height
+      width: imgRef.current.width,
+      height: imgRef.current.height
     };
 
     if (!crop.width || !crop.height || crop.width <= 0 || crop.height <= 0) {
       return;
     }
 
-    const scaleX = image.naturalWidth / image.width;
-    const scaleY = image.naturalHeight / image.height;
+    const scaleX = imgRef.current.naturalWidth / imgRef.current.width;
+    const scaleY = imgRef.current.naturalHeight / imgRef.current.height;
     const ctx = canvas.getContext('2d');
 
     canvas.width = crop.width * scaleX;
@@ -310,7 +560,17 @@ function App() {
       return;
     }
 
-    if (focusEnabled && focusPoints.length > 0) {
+    // Clear canvas with transparency support
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Check if we have erased content
+    const hasErasedContent = eraseCanvasRef.current && eraseCanvasRef.current.width > 0;
+
+    // Use erased canvas if available, otherwise use original
+    const sourceImage = hasErasedContent ? eraseCanvasRef.current : imgRef.current;
+
+    if (focusEnabled && focusPoints.length > 0 && !hasErasedContent) {
+      // Apply focus effect
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = crop.width * scaleX;
       tempCanvas.height = crop.height * scaleY;
@@ -318,7 +578,7 @@ function App() {
 
       tempCtx.filter = `blur(${blurStrength}px) brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
       tempCtx.drawImage(
-        image,
+        imgRef.current,
         crop.x * scaleX,
         crop.y * scaleY,
         crop.width * scaleX,
@@ -352,7 +612,7 @@ function App() {
       ctx.globalCompositeOperation = 'destination-over';
       ctx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
       ctx.drawImage(
-        image,
+        imgRef.current,
         crop.x * scaleX,
         crop.y * scaleY,
         crop.width * scaleX,
@@ -365,9 +625,10 @@ function App() {
 
       ctx.globalCompositeOperation = 'source-over';
     } else {
+      // Normal image with filters (use erased canvas if available)
       ctx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
       ctx.drawImage(
-        image,
+        sourceImage,
         crop.x * scaleX,
         crop.y * scaleY,
         crop.width * scaleX,
@@ -398,13 +659,11 @@ function App() {
         ctx.setLineDash([]);
       }
       
-      // Draw line
       ctx.beginPath();
       ctx.moveTo(startX, startY);
       ctx.lineTo(endX, endY);
       ctx.stroke();
       
-      // Draw arrowhead
       const angle = Math.atan2(endY - startY, endX - startX);
       const arrowLength = 20;
       const arrowAngle = Math.PI / 6;
@@ -479,7 +738,7 @@ function App() {
     );
   }
 
-  // Download the cropped and compressed image
+  // Download image
   function downloadImage() {
     if (!canvasRef.current) return;
 
@@ -501,7 +760,7 @@ function App() {
     );
   }
 
-  // Reset all filters
+  // Reset filters
   function resetFilters() {
     setBrightness(100);
     setContrast(100);
@@ -526,20 +785,22 @@ function App() {
     }
   }, [imgSrc]);
 
-  // Update preview when anything changes
-  useEffect(() => {
-    if (imgRef.current && imgSrc) {
-      generatePreview();
-    }
-  }, [completedCrop, quality, brightness, contrast, saturation, focusEnabled, focusPoints, focusSize, blurStrength, textOverlays, arrows]);
+  // NEW CODE ✅ - Also update when erased canvas changes
+useEffect(() => {
+  if (imgRef.current && imgSrc) {
+    generatePreview();
+  }
+}, [completedCrop, quality, brightness, contrast, saturation, focusEnabled, focusPoints, focusSize, blurStrength, textOverlays, arrows, editMode, isErasing , eraseStrokes]);
 
-  // Get filter style for live preview
+
+  // Get filter style
   const getFilterStyle = () => {
     return {
       filter: `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`,
       cursor: editMode === 'focus' && focusEnabled ? 'crosshair' : 
               editMode === 'text' ? 'text' : 
-              editMode === 'arrow' ? 'crosshair' : 'default'
+              editMode === 'arrow' ? 'crosshair' :
+              editMode === 'erase' ? 'none' : 'default'
     };
   };
 
@@ -593,51 +854,106 @@ function App() {
               >
                 ➡️ Arrow
               </button>
+              <button 
+                className={`mode-btn ${editMode === 'erase' ? 'active' : ''}`}
+                onClick={() => setEditMode('erase')}
+              >
+                🧹 Erase
+              </button>
             </div>
 
             <div className="editor-section">
               <div className="crop-container" ref={containerRef}>
                 <div style={{ position: 'relative', display: 'inline-block' }}>
-                  {editMode === 'crop' ? (
-                    <ReactCrop
-                      crop={crop}
-                      onChange={(c) => setCrop(c)}
-                      onComplete={(c) => {
-                        setCompletedCrop(c);
-                      }}
-                      aspect={undefined}
-                    >
-                      <img
-                        ref={imgRef}
-                        src={imgSrc}
-                        alt="Upload"
-                        style={{ maxWidth: '100%', display: 'block', ...getFilterStyle() }}
-                      />
-                    </ReactCrop>
-                  ) : (
-                    <>
-                      <img
-                        ref={imgRef}
-                        src={imgSrc}
-                        alt="Upload"
-                        style={{ maxWidth: '100%', display: 'block', ...getFilterStyle() }}
-                        onClick={handleImageClick}
-                      />
-                      {completedCrop && imgRef.current && (
-                        <div style={{
-                          position: 'absolute',
-                          left: `${(completedCrop.x / imgRef.current.width) * 100}%`,
-                          top: `${(completedCrop.y / imgRef.current.height) * 100}%`,
-                          width: `${(completedCrop.width / imgRef.current.width) * 100}%`,
-                          height: `${(completedCrop.height / imgRef.current.height) * 100}%`,
-                          border: '2px dashed rgba(102, 126, 234, 0.5)',
-                          pointerEvents: 'none'
-                        }} />
-                      )}
-                    </>
-                  )}
-                  
-                  {/* Render focus point indicators - DRAGGABLE */}
+           {editMode === 'crop' ? (
+  <ReactCrop
+    crop={crop}
+    onChange={(c) => setCrop(c)}
+    onComplete={(c) => {
+      setCompletedCrop(c);
+    }}
+    aspect={undefined}
+  >
+    {eraseStrokes > 0 ? (
+      <canvas
+        ref={eraseCanvasRef}
+        style={{ maxWidth: '100%', display: 'block', ...getFilterStyle() }}
+      />
+    ) : (
+      <img
+        ref={imgRef}
+        src={imgSrc}
+        alt="Upload"
+        style={{ maxWidth: '100%', display: 'block', ...getFilterStyle() }}
+      />
+    )}
+  </ReactCrop>
+) : (
+  <>
+    {/* Hidden original image for reference */}
+    <img
+      ref={imgRef}
+      src={imgSrc}
+      alt="Upload"
+      style={{ 
+        maxWidth: '100%', 
+        display: eraseStrokes > 0 ? 'none' : (editMode === 'erase' ? 'none' : 'block'),
+        ...getFilterStyle() 
+      }}
+      onClick={handleImageClick}
+    />
+
+    {/* Erase Canvas - Shows when in erase mode OR after erasing */}
+    <canvas
+      ref={eraseCanvasRef}
+      style={{
+        maxWidth: '100%',
+        display: editMode === 'erase' || eraseStrokes > 0 ? 'block' : 'none',
+        background: editMode === 'erase' && eraseMode === 'transparent' ? 'repeating-conic-gradient(#ddd 0% 25%, white 0% 50%) 50% / 20px 20px' : 'transparent',
+        ...getFilterStyle()
+      }}
+      onClick={editMode !== 'erase' ? handleImageClick : undefined}
+      onMouseDown={editMode === 'erase' ? handleEraseMouseDown : undefined}
+      onMouseMove={editMode === 'erase' ? handleEraseMouseMove : undefined}
+      onMouseUp={editMode === 'erase' ? handleEraseMouseUp : undefined}
+      onMouseLeave={editMode === 'erase' ? handleEraseMouseLeave : undefined}
+    />
+
+    {completedCrop && imgRef.current && editMode !== 'erase' && (
+      <div style={{
+        position: 'absolute',
+        left: `${(completedCrop.x / imgRef.current.width) * 100}%`,
+        top: `${(completedCrop.y / imgRef.current.height) * 100}%`,
+        width: `${(completedCrop.width / imgRef.current.width) * 100}%`,
+        height: `${(completedCrop.height / imgRef.current.height) * 100}%`,
+        border: '2px dashed rgba(102, 126, 234, 0.5)',
+        pointerEvents: 'none'
+      }} />
+    )}
+
+    {/* Eraser brush cursor */}
+    {editMode === 'erase' && brushPosition.visible && (
+      <div
+        className="brush-cursor"
+        style={{
+          position: 'absolute',
+          left: brushPosition.x,
+          top: brushPosition.y,
+          width: `${brushSize}px`,
+          height: `${brushSize}px`,
+          border: '2px solid #667eea',
+          borderRadius: '50%',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none',
+          zIndex: 9999,
+          background: 'rgba(102, 126, 234, 0.1)'
+        }}
+      />
+    )}
+  </>
+)}
+
+                  {/* Render focus points */}
                   {focusEnabled && focusPoints.map((point, index) => {
                     if (!imgRef.current) return null;
                     
@@ -695,7 +1011,7 @@ function App() {
                     );
                   })}
 
-                  {/* Render arrows - DRAGGABLE */}
+                  {/* Render arrows */}
                   {arrows.map((arrowObj) => {
                     if (!imgRef.current) return null;
                     
@@ -771,7 +1087,7 @@ function App() {
                     );
                   })}
 
-                  {/* Render text overlays - DRAGGABLE with ROTATION */}
+                  {/* Render text overlays */}
                   {textOverlays.map((textObj) => {
                     if (!imgRef.current) return null;
                     
@@ -819,6 +1135,101 @@ function App() {
               </div>
 
               <div className="controls">
+                {editMode === 'erase' && (
+                  <>
+                    <h3 className="section-title">🧹 Eraser Tool</h3>
+                    
+                    <div className="toggle-group">
+                      <p className="hint">
+                        🖌️ Drag over logos to erase • 3 modes available!
+                      </p>
+                    </div>
+
+                    <div className="control-group">
+                      <label>Brush Size: <strong>{brushSize}px</strong></label>
+                      <input
+                        type="range"
+                        min="5"
+                        max="100"
+                        value={brushSize}
+                        onChange={(e) => setBrushSize(Number(e.target.value))}
+                        className="slider"
+                      />
+                    </div>
+
+                    <div className="control-group">
+                      <label>Erase Mode:</label>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
+                        <label className="radio-label">
+                          <input
+                            type="radio"
+                            name="eraseMode"
+                            value="blur"
+                            checked={eraseMode === 'blur'}
+                            onChange={(e) => setEraseMode(e.target.value)}
+                          />
+                          <span>🌫️ Smart Blur (Blend naturally)</span>
+                        </label>
+                        <label className="radio-label">
+                          <input
+                            type="radio"
+                            name="eraseMode"
+                            value="transparent"
+                            checked={eraseMode === 'transparent'}
+                            onChange={(e) => setEraseMode(e.target.value)}
+                          />
+                          <span>✨ Transparent</span>
+                        </label>
+                        <label className="radio-label">
+                          <input
+                            type="radio"
+                            name="eraseMode"
+                            value="color"
+                            checked={eraseMode === 'color'}
+                            onChange={(e) => setEraseMode(e.target.value)}
+                          />
+                          <span>🎨 Fill with Color</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {eraseMode === 'blur' && (
+                      <div className="control-group">
+                        <label>Blur Strength: <strong>{eraseBlurStrength}px</strong></label>
+                        <input
+                          type="range"
+                          min="5"
+                          max="50"
+                          value={eraseBlurStrength}
+                          onChange={(e) => setEraseBlurStrength(Number(e.target.value))}
+                          className="slider"
+                        />
+                      </div>
+                    )}
+
+                    {eraseMode === 'color' && (
+                      <div className="control-group">
+                        <label>Fill Color:</label>
+                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                          <input
+                            type="color"
+                            value={eraseFillColor}
+                            onChange={(e) => setEraseFillColor(e.target.value)}
+                            style={{ width: '50px', height: '35px', cursor: 'pointer', border: 'none', borderRadius: '5px' }}
+                          />
+                          <span style={{ fontFamily: 'monospace' }}>{eraseFillColor}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="erase-controls">
+                      <button onClick={resetEraseCanvas} className="undo-btn">
+                        🔄 Reset Eraser
+                      </button>
+                    </div>
+                  </>
+                )}
+
                 {editMode === 'arrow' && (
                   <>
                     <h3 className="section-title">➡️ Arrows</h3>
