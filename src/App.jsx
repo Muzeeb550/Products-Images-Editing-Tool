@@ -386,7 +386,6 @@ function resetEraseCanvas() {
   setEraseStrokes(0);
 }
 
-
   function handleFocusMouseMove(e) {
     if (draggingFocus && imgRef.current && editMode === 'focus') {
       const rect = imgRef.current.getBoundingClientRect();
